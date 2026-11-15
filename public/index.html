@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Batloung Farm - Distribution Management</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root{--g:#1f4e8c;--g2:#e3ecf8;--bd:#d3dbe8;--red:#c62828;--bg:#f3f6fb}
+  *{box-sizing:border-box}
+  body{font-family:system-ui,Segoe UI,sans-serif;margin:0;background:var(--bg);color:#1d261d}
+  header{background:var(--g);color:#fff;padding:10px 16px;display:flex;flex-wrap:wrap;align-items:center;gap:12px}
+  header h1{font-size:18px;margin:0 12px 0 0}
+  nav{display:flex;flex-wrap:wrap;gap:4px}
+  nav button{background:transparent;color:#fff;border:1px solid rgba(255,255,255,.4);padding:6px 12px;border-radius:6px;cursor:pointer}
+  nav button.on{background:#fff;color:var(--g);font-weight:600}
+  main{padding:16px;max-width:1150px;margin:auto}
+  h2{margin:0 0 12px;font-size:20px;color:var(--g)} h3{margin:18px 0 8px}
+  .card{background:#fff;border:1px solid var(--bd);border-radius:10px;padding:14px;margin-bottom:16px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+  .stat{background:#fff;border:1px solid var(--bd);border-radius:10px;padding:12px}
+  .stat b{display:block;font-size:22px;color:var(--g)}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{padding:7px 8px;border-bottom:1px solid #e3e8f0;text-align:left;vertical-align:top}
+  th{background:var(--g2)} .wrap{overflow-x:auto}
+  .low{color:var(--red);font-weight:700}
+  input,select{padding:7px;border:1px solid #b5c0d3;border-radius:6px;font:inherit;max-width:100%}
+  .row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;align-items:center}
+  button.b{background:var(--g);color:#fff;border:0;padding:8px 14px;border-radius:6px;cursor:pointer;font:inherit}
+  button.b.sec{background:#fff;color:var(--g);border:1px solid var(--g)}
+  button.b.del{background:var(--red)}
+  .tag{padding:2px 8px;border-radius:10px;font-size:12px;font-weight:600}
+  .PAID{background:#d7f0d7;color:#1b5e20}.PARTIALLY_PAID{background:#fff0c2;color:#7a5b00}.UNPAID{background:#fbd9d9;color:#8e1c1c}
+  #toast{position:fixed;right:16px;bottom:16px;padding:12px 16px;border-radius:8px;color:#fff;display:none;max-width:380px;z-index:9999}
+  #map{height:480px;border-radius:10px}
+  .muted{color:#667}
+  .PENDING{background:#e3f2fd;color:#0d47a1}.DELIVERED{background:#d7f0d7;color:#1b5e20}
+  .best{background:#fff8e1}
+</style>
+</head>
+<body>
+<header>
+  <h1>Batloung Farm</h1>
+  <nav id="nav"></nav>
+</header>
+<main id="view">Loading...</main>
+<div id="toast"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const SIZES = ['small', 'medium', 'large'];
+const PROVINCES = ['Gauteng','Free State','KwaZulu-Natal','Western Cape','Eastern Cape','Limpopo','Mpumalanga','North West'];
+const $ = (s, r = document) => r.querySelector(s);
+const M = (n) => 'M' + Number(n || 0).toFixed(2);
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const fmtTime = (m) => m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m} min`;
+const tripText = (t) => t ? `${t.distance_km} km, about ${fmtTime(t.one_way_minutes)} one way (${fmtTime(t.round_trip_minutes)} round trip)` : 'No coordinates yet';
+const opts = (arr, val, label) => arr.map((x) => `<option value="${esc(val(x))}">${esc(label(x))}</option>`).join('');
+const table = (heads, rows) => `<div class="wrap"><table><tr>${heads.map((h) => `<th>${h}</th>`).join('')}</tr>${rows.join('') || `<tr><td colspan="${heads.length}" class="muted">Nothing here yet</td></tr>`}</table></div>`;
+
+async function api(path, method = 'GET', body) {
+  const r = await fetch('/api' + path, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.message || `Request failed (${r.status})`);
+  return j;
+}
+function toast(msg, bad, ms = 4500) {
+  const t = $('#toast'); t.textContent = msg; t.style.background = bad ? '#c62828' : '#1f4e8c'; t.style.display = 'block';
+  clearTimeout(toast.t); toast.t = setTimeout(() => (t.style.display = 'none'), ms);
+}
+// run an action, show errors as toasts, then re-render
+async function act(fn, okMsg) {
+  try { await fn(); if (okMsg) toast(okMsg); show(current); } catch (e) { toast(e.message, true); }
+}
+const formData = (root) => Object.fromEntries([...root.querySelectorAll('[name]')].map((i) => [i.name, i.value.trim()]));
+
+// ---------- click-on-map to fill latitude/longitude ----------
+function attachPicker(form, center, zoom) {
+  const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'b sec'; btn.textContent = 'Pick on map';
+  const box = document.createElement('div'); box.style.cssText = 'height:300px;margin-top:10px;display:none;border-radius:10px';
+  form.querySelector('.row').appendChild(btn); form.appendChild(box);
+  let map; let marker;
+  // also fill the Location / Address text box with the place name (free OpenStreetMap lookup, needs internet)
+  const place = form.querySelector('[name=location]') || form.querySelector('[name=address]');
+  let autoFilled = true;
+  if (place) place.addEventListener('input', () => { autoFilled = false; });
+  const fillPlace = (lat, lng) => {
+    if (!place || !(autoFilled || !place.value)) return;
+    fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&accept-language=en&lat=${lat}&lon=${lng}`)
+      .then((r) => r.json()).then((j) => {
+        const a = j.address || {};
+        const name = [a.road, a.suburb || a.neighbourhood, a.village || a.town || a.city || a.county].filter(Boolean).join(', ') || j.display_name;
+        if (name) { place.value = name; autoFilled = true; }
+      }).catch(() => {});
+  };
+  btn.onclick = () => {
+    const open = box.style.display === 'none'; box.style.display = open ? 'block' : 'none'; if (!open) return;
+    if (!map) {
+      map = L.map(box).setView(center, zoom);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+      map.on('click', (e) => {
+        form.querySelector('[name=latitude]').value = e.latlng.lat.toFixed(6);
+        form.querySelector('[name=longitude]').value = e.latlng.lng.toFixed(6);
+        if (marker) marker.setLatLng(e.latlng); else marker = L.marker(e.latlng).addTo(map);
+        fillPlace(e.latlng.lat.toFixed(6), e.latlng.lng.toFixed(6));
+      });
+    }
+    setTimeout(() => map.invalidateSize(), 50);
+  };
+}
+const clock = (iso) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+// ---------- item rows (shared by purchases and sales) ----------
+function addItemRow(box, fruits, withCost) {
+  const d = document.createElement('div'); d.className = 'row item';
+  d.innerHTML = `<select name="fruit_id">${opts(fruits, (f) => f.fruit_id, (f) => f.fruit_name)}</select>
+    <select name="packaging_size">${opts(SIZES, (s) => s, (s) => s)}</select>
+    <input name="quantity" type="number" min="1" value="1" style="width:90px" placeholder="Boxes">
+    ${withCost ? '<input name="unit_cost" type="number" min="0.01" step="0.01" placeholder="Unit cost" style="width:110px">' : '<span class="price muted"></span>'}
+    <button type="button" class="b sec" onclick="this.parentElement.remove();window.calcTotal&&calcTotal()">x</button>`;
+  box.appendChild(d);
+}
+function readItems(box, withCost) {
+  return [...box.querySelectorAll('.item')].map((r) => {
+    const o = { fruit_id: Number(r.querySelector('[name=fruit_id]').value), packaging_size: r.querySelector('[name=packaging_size]').value,
+      quantity: Number(r.querySelector('[name=quantity]').value) };
+    if (withCost) o.unit_cost = Number(r.querySelector('[name=unit_cost]').value);
+    return o;
+  });
+}
+
+// ---------- views ----------
+const views = {
+  async dashboard(el) {
+    const [low, bal, top, tv, rev] = await Promise.all([api('/stock/low'), api('/vendors/balances'), api('/reports/top-fruits'),
+      api('/reports/top-vendor').catch(() => ({ data: null })), api('/sales')]);
+    const owed = bal.data.reduce((s, v) => s + v.outstanding_balance, 0);
+    const revenue = rev.data.reduce((s, x) => s + x.total_amount, 0);
+    el.innerHTML = `<h2>Dashboard</h2>
+      <div class="grid">
+        <div class="stat">Total sales<b>${M(revenue)}</b>${rev.count} sale(s)</div>
+        <div class="stat">Outstanding payments<b>${M(owed)}</b>${bal.data.filter((v) => v.outstanding_balance > 0).length} vendor(s) owe</div>
+        <div class="stat">Low-stock lines<b class="${low.count ? 'low' : ''}">${low.count}</b>at or below ${low.threshold} boxes</div>
+        <div class="stat">Top vendor<b style="font-size:16px">${tv.data ? esc(tv.data.vendor_name) : '-'}</b>${tv.data ? tv.data.total_boxes + ' boxes' : ''}</div>
+      </div>
+      <div class="card" style="margin-top:16px"><h3>Low stock</h3>${table(['Fruit', 'Size', 'Boxes left'],
+        low.data.map((r) => `<tr><td>${esc(r.fruit_name)}</td><td>${r.packaging_size}</td><td class="low">${r.available_quantity}</td></tr>`))}</div>
+      <div class="card"><h3>Best-selling fruits</h3>${table(['Fruit', 'Boxes sold'],
+        top.data.map((r) => `<tr><td>${esc(r.fruit_name)}</td><td>${r.boxes_sold}</td></tr>`))}</div>`;
+  },
+
+  async stock(el) {
+    const s = await api('/stock');
+    const by = {};
+    s.data.forEach((r) => { (by[r.fruit_name] ||= {})[r.packaging_size] = r.available_quantity; });
+    const cell = (q) => `<td class="${q <= 10 ? 'low' : ''}">${q ?? 0}</td>`;
+    el.innerHTML = `<h2>Stock by packaging size</h2><div class="card">${table(['Fruit', 'Small', 'Medium', 'Large'],
+      Object.entries(by).map(([n, v]) => `<tr><td>${esc(n)}</td>${cell(v.small)}${cell(v.medium)}${cell(v.large)}</tr>`))}
+      <p class="muted">Red = 10 boxes or fewer (low stock).</p></div>`;
+  },
+
+  async suppliers(el) {
+    const s = await api('/suppliers');
+    el.innerHTML = `<h2>Suppliers</h2>
+      <div class="card" id="f"><h3 style="margin-top:0">Register supplier</h3><div class="row">
+        <input name="business_name" placeholder="Business name"><input name="contact_person" placeholder="Contact person">
+        <input name="phone" placeholder="Phone"><select name="province">${opts(PROVINCES, (x) => x, (x) => x)}</select>
+        <input name="address" placeholder="Address" style="min-width:240px">
+        <input name="latitude" type="number" step="any" placeholder="Latitude" style="width:110px"><input name="longitude" type="number" step="any" placeholder="Longitude" style="width:110px">
+        <button class="b" id="add">Add</button></div><span class="muted">Latitude/longitude are optional and power the travel-time estimate from Maseru.</span></div>
+      <div class="card">${table(['ID', 'Business', 'Contact', 'Phone', 'Province', 'Trip from Maseru', ''], s.data.map((x) => `<tr><td>${x.supplier_id}</td>
+        <td>${esc(x.business_name)}</td><td>${esc(x.contact_person)}</td><td>${esc(x.phone)}</td><td>${esc(x.province)}</td><td>${tripText(x.trip)}</td>
+        <td><button class="b sec" data-edit="${x.supplier_id}">Edit phone</button> <button class="b del" data-del="${x.supplier_id}">Delete</button></td></tr>`))}</div>`;
+    attachPicker($('#f'), [-28.5, 27], 5);
+    $('#add').onclick = () => act(() => { const d = formData($('#f')); ['latitude', 'longitude'].forEach((k) => { if (d[k] === '') delete d[k]; }); return api('/suppliers', 'POST', d); }, 'Supplier registered');
+    el.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => confirm('Delete this supplier?') && act(() => api('/suppliers/' + b.dataset.del, 'DELETE'), 'Supplier deleted'));
+    el.querySelectorAll('[data-edit]').forEach((b) => b.onclick = () => { const p = prompt('New phone number:'); if (p) act(() => api('/suppliers/' + b.dataset.edit, 'PUT', { phone: p }), 'Supplier updated'); });
+  },
+
+  async fruits(el) {
+    const f = await api('/fruits?status=all');
+    el.innerHTML = `<h2>Fruits and selling prices</h2>
+      <div class="card" id="f"><h3 style="margin-top:0">Register fruit</h3><div class="row">
+        <input name="fruit_name" placeholder="Fruit name"><input name="description" placeholder="Description">
+        <input name="p_small" type="number" step="0.01" placeholder="Small price" style="width:110px">
+        <input name="p_medium" type="number" step="0.01" placeholder="Medium price" style="width:110px">
+        <input name="p_large" type="number" step="0.01" placeholder="Large price" style="width:110px"><button class="b" id="add">Add</button></div></div>
+      <div class="card">${table(['ID', 'Fruit', 'Description', 'Small', 'Medium', 'Large', 'Status', ''], f.data.map((x) => `<tr><td>${x.fruit_id}</td>
+        <td>${esc(x.fruit_name)}</td><td>${esc(x.description)}</td><td>${x.price_small ? M(x.price_small) : '-'}</td><td>${x.price_medium ? M(x.price_medium) : '-'}</td>
+        <td>${x.price_large ? M(x.price_large) : '-'}</td><td>${x.status}</td>
+        <td><button class="b sec" data-t="${x.fruit_id}|${x.status}">${x.status === 'ACTIVE' ? 'Deactivate' : 'Activate'}</button></td></tr>`))}</div>`;
+    $('#add').onclick = () => act(() => {
+      const d = formData($('#f')); const prices = {};
+      SIZES.forEach((s) => { if (d['p_' + s]) prices[s] = Number(d['p_' + s]); });
+      return api('/fruits', 'POST', { fruit_name: d.fruit_name, description: d.description, prices: Object.keys(prices).length ? prices : undefined });
+    }, 'Fruit registered');
+    el.querySelectorAll('[data-t]').forEach((b) => b.onclick = () => { const [id, st] = b.dataset.t.split('|');
+      act(() => api('/fruits/' + id, 'PUT', { status: st === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE' }), 'Fruit updated'); });
+  },
+
+  async vendors(el) {
+    const v = await api('/vendors/balances');
+    const draw = (list) => { $('#vt').innerHTML = table(['ID', 'Vendor', 'Phone', 'Location', 'Orders', 'Billed', 'Paid', 'Owes'], list.map((x) => `<tr><td>${x.vendor_id}</td>
+      <td>${esc(x.vendor_name)}</td><td>${esc(x.phone_number)}</td><td>${esc(x.location)}</td><td>${x.total_orders ?? '-'}</td><td>${M(x.total_billed)}</td>
+      <td>${M(x.total_paid)}</td><td class="${x.outstanding_balance > 0 ? 'low' : ''}">${M(x.outstanding_balance)}</td></tr>`)); };
+    el.innerHTML = `<h2>Vendors</h2>
+      <div class="card" id="f"><h3 style="margin-top:0">Register vendor</h3><div class="row">
+        <input name="vendor_name" placeholder="Vendor name"><input name="phone_number" placeholder="Phone"><input name="location" placeholder="Location">
+        <input name="latitude" type="number" step="any" placeholder="Latitude" style="width:110px"><input name="longitude" type="number" step="any" placeholder="Longitude" style="width:110px">
+        <button class="b" id="add">Add</button></div><span class="muted">Latitude/longitude are optional and power the map and delivery time.</span></div>
+      <div class="card"><div class="row"><input id="q" placeholder="Search by name or phone"><button class="b sec" id="go">Search</button><button class="b sec" id="all">Show all</button></div>
+      <div id="vt"></div></div>`;
+    draw(v.data);
+    attachPicker($('#f'), [-29.6, 28.1], 8);
+    $('#add').onclick = () => act(() => { const d = formData($('#f')); ['latitude', 'longitude'].forEach((k) => { if (d[k] === '') delete d[k]; }); return api('/vendors', 'POST', d); }, 'Vendor registered');
+    $('#go').onclick = async () => { try { const r = await api('/vendors/search?q=' + encodeURIComponent($('#q').value)); draw(r.data.map((x) => v.data.find((b) => b.vendor_id === x.vendor_id) || x)); } catch (e) { toast(e.message, true); } };
+    $('#all').onclick = () => draw(v.data);
+  },
+
+  async purchases(el) {
+    const [s, f, p] = await Promise.all([api('/suppliers'), api('/fruits'), api('/purchases')]);
+    el.innerHTML = `<h2>Purchases from suppliers</h2>
+      <div class="card"><h3 style="margin-top:0">Which supplier is really cheapest?</h3>
+        <div class="row"><select id="cf">${opts(f.data, (x) => x.fruit_id, (x) => x.fruit_name)}</select><select id="cs">${opts(SIZES, (x) => x, (x) => x)}</select>
+          <input id="cq" type="number" min="1" value="20" style="width:90px"> boxes <button class="b sec" id="cmp">Compare suppliers</button></div>
+        <div id="cmpOut" class="muted">Compares each supplier's last price plus the cost of the trip from Maseru.</div></div>
+      <div class="card" id="f"><h3 style="margin-top:0">Record purchase</h3>
+        <div class="row"><select name="supplier_id">${opts(s.data, (x) => x.supplier_id, (x) => `${x.business_name} (${x.province})`)}</select></div>
+        <div id="trip" class="card" style="background:#fff8e1;border-color:#f0d98a"></div>
+        <div id="items"></div><div class="row"><button class="b sec" id="more">+ Add fruit</button><button class="b" id="save">Save purchase</button></div>
+        <div id="landed"></div>
+        <p class="muted">Total is calculated automatically and stock is increased.</p></div>
+      <div class="card">${table(['ID', 'Date', 'Supplier', 'Total'], p.data.map((x) => `<tr><td>${x.purchase_id}</td><td>${new Date(x.purchase_date).toLocaleString()}</td>
+        <td>${esc(x.business_name)}</td><td>${M(x.total_amount)}</td></tr>`))}</div>`;
+    const sup = () => s.data.find((x) => x.supplier_id === Number($('[name=supplier_id]').value));
+    const calcLanded = () => {
+      const t = sup() && sup().trip; const rows = readItems($('#items'), true);
+      const boxes = rows.reduce((a, r) => a + (r.quantity || 0), 0); const goods = rows.reduce((a, r) => a + (r.quantity || 0) * (r.unit_cost || 0), 0);
+      $('#landed').innerHTML = (t && boxes && goods) ? `<p>Goods ${M(goods)} + trip ${M(t.trip_cost)} = <b>${M(goods + t.trip_cost)}</b> for ${boxes} boxes
+        &rarr; landed cost <b>${M((goods + t.trip_cost) / boxes)}</b> per box on average</p>` : '';
+    };
+    window.calcTotal = calcLanded;
+    const showTrip = () => { const x = sup(); const t = x && x.trip;
+      $('#trip').innerHTML = x ? `<b>Trip to ${esc(x.business_name)} (${esc(x.province)})</b><br>${tripText(t)}` +
+        (t ? `<br><span class="muted">Driving alone: ${fmtTime(t.drive_minutes)}, plus about ${fmtTime(t.border_minutes)} at the border each way.
+        Estimated trip cost (fuel, vehicle, permits): <b>${M(t.trip_cost)}</b></span>` : '') : ''; calcLanded(); };
+    $('[name=supplier_id]').onchange = showTrip; showTrip();
+    addItemRow($('#items'), f.data, true);
+    $('#items').addEventListener('input', calcLanded);
+    $('#more').onclick = () => addItemRow($('#items'), f.data, true);
+    $('#save').onclick = () => act(() => api('/purchases', 'POST', { supplier_id: Number($('[name=supplier_id]').value), items: readItems($('#items'), true) }), 'Purchase recorded, stock updated');
+    $('#cmp').onclick = async () => { try {
+      const r = await api(`/suppliers/compare?fruit_id=${$('#cf').value}&packaging_size=${$('#cs').value}&quantity=${$('#cq').value}`);
+      $('#cmpOut').innerHTML = r.count ? table(['Supplier', 'Province', 'Last price / box', 'Trip', 'Trip cost', 'Landed cost / box', ''], r.data.map((x, i) =>
+        `<tr class="${i === 0 ? 'best' : ''}"><td>${esc(x.business_name)}</td><td>${esc(x.province)}</td><td>${M(x.last_unit_cost)}</td>
+        <td>${x.trip.distance_km} km, ${fmtTime(x.trip.one_way_minutes)} one way</td><td>${M(x.trip.trip_cost)}</td><td><b>${M(x.landed_cost_per_box)}</b></td>
+        <td>${x.tags.map((t) => `<span class="tag PENDING">${t}</span>`).join(' ')}</td></tr>`)) +
+        '<p class="muted">Landed cost = last price + (trip cost / boxes). The cheapest price is not always the cheapest supplier once travel is counted.</p>'
+        : 'No supplier with a purchase history for that fruit and size yet.'; } catch (e) { toast(e.message, true); } };
+  },
+
+  async sales(el) {
+    const [v, f, s] = await Promise.all([api('/vendors'), api('/fruits'), api('/sales')]);
+    el.innerHTML = `<h2>Sales to vendors</h2>
+      <div class="card" id="f"><h3 style="margin-top:0">Record sale</h3>
+        <div class="row"><select name="vendor_id">${opts(v.data, (x) => x.vendor_id, (x) => `${x.vendor_name} - ${x.location}`)}</select>
+          <select name="payment_method"><option value="CASH">Cash</option><option value="MOBILE_MONEY">Mobile money</option><option value="CREDIT">Credit (pay later)</option></select>
+          <input name="amount_paid" type="number" step="0.01" min="0" placeholder="Amount paid (blank = full)" style="width:200px"></div>
+        <div id="items"></div>
+        <div class="row"><button class="b sec" id="more">+ Add fruit</button><b id="tot">Total: M0.00</b><button class="b" id="save">Save sale</button></div>
+        <p class="muted">Prices come from the price list. If any item lacks stock, the whole sale is rejected.</p></div>
+      <div class="card">${table(['ID', 'Date', 'Vendor', 'Total', 'Paid', 'Owes', 'Payment', 'Delivery', ''], s.data.map((x) => `<tr><td>${x.sale_id}</td><td>${new Date(x.sale_date).toLocaleDateString()}</td>
+        <td>${esc(x.vendor_name)}</td><td>${M(x.total_amount)}</td><td>${M(x.amount_paid)}</td><td>${M(x.outstanding_balance)}</td>
+        <td><span class="tag ${x.payment_status}">${x.payment_status}</span></td>
+        <td><span class="tag ${x.delivery_status}">${x.delivery_status}</span> <button class="b sec" data-dv="${x.sale_id}|${x.delivery_status}">${x.delivery_status === 'PENDING' ? 'Mark delivered' : 'Undo'}</button></td>
+        <td>${x.outstanding_balance > 0 ? `<button class="b sec" data-pay="${x.sale_id}">Record payment</button>` : ''}</td></tr>`))}</div>`;
+    window.calcTotal = () => {
+      let t = 0;
+      el.querySelectorAll('.item').forEach((r) => {
+        const fr = f.data.find((x) => x.fruit_id === Number(r.querySelector('[name=fruit_id]').value));
+        const size = r.querySelector('[name=packaging_size]').value;
+        const price = fr ? fr['price_' + size] : 0; const q = Number(r.querySelector('[name=quantity]').value) || 0;
+        r.querySelector('.price').textContent = price ? `${M(price)} / box` : 'no price';
+        t += price * q;
+      });
+      $('#tot').textContent = 'Total: ' + M(t);
+    };
+    const add = () => { addItemRow($('#items'), f.data, false); const r = $('#items').lastChild; r.querySelectorAll('select,input').forEach((i) => i.oninput = calcTotal); calcTotal(); };
+    add(); $('#more').onclick = add;
+    $('#save').onclick = async () => { try {
+      const d = formData($('#f')); const body = { vendor_id: Number(d.vendor_id), payment_method: d.payment_method, items: readItems($('#items'), false) };
+      if (d.amount_paid !== '') body.amount_paid = Number(d.amount_paid);
+      const r = (await api('/sales', 'POST', body)).data; const dl = r.delivery;
+      toast(`Sale #${r.sale_id} recorded (${M(r.total_amount)}). ` + (dl ? `Deliver to ${r.vendor_name}: ${dl.distance_km} km, about ${fmtTime(dl.eta_minutes)} - arrives around ${clock(dl.arrives_at)}.` : 'Add map coordinates to this vendor to see a delivery time.'), false, 12000);
+      show('sales');
+    } catch (e) { toast(e.message, true); } };
+    el.querySelectorAll('[data-pay]').forEach((b) => b.onclick = () => {
+      const amount = prompt('Amount received:'); if (!amount) return;
+      const method = (prompt('Method: CASH or MOBILE_MONEY', 'CASH') || '').toUpperCase();
+      act(() => api(`/sales/${b.dataset.pay}/payments`, 'POST', { method, amount: Number(amount) }), 'Payment recorded');
+    });
+    el.querySelectorAll('[data-dv]').forEach((b) => b.onclick = () => { const [id, st] = b.dataset.dv.split('|');
+      act(() => api(`/sales/${id}/delivery`, 'PATCH', { status: st === 'PENDING' ? 'DELIVERED' : 'PENDING' }), 'Delivery updated'); });
+  },
+
+  async reports(el) {
+    const [tf, tv, sl] = await Promise.all([api('/reports/top-fruits'), api('/reports/top-vendor').catch(() => ({ data: null })), api('/reports/stock-levels')]);
+    el.innerHTML = `<h2>Reports</h2>
+      <div class="card"><h3 style="margin-top:0">1. Five most frequently sold fruits</h3>${table(['Fruit', 'Boxes sold'], tf.data.map((r) => `<tr><td>${esc(r.fruit_name)}</td><td>${r.boxes_sold}</td></tr>`))}</div>
+      <div class="card"><h3 style="margin-top:0">2. Sales revenue for a date range</h3><div class="row"><input type="date" id="from" value="2026-10-01"><input type="date" id="to" value="2026-10-31">
+        <button class="b" id="rv">Calculate</button></div><div id="rvOut" class="muted"></div></div>
+      <div class="card"><h3 style="margin-top:0">3. Vendor with the most boxes</h3>${tv.data ? `<b>${esc(tv.data.vendor_name)}</b> - ${tv.data.total_boxes} boxes (${esc(tv.data.location)})` : 'No sales yet'}</div>
+      <div class="card"><h3 style="margin-top:0">4. Current stock per fruit and size</h3>${table(['Fruit', 'Size', 'Boxes'], sl.data.map((r) => `<tr><td>${esc(r.fruit_name)}</td><td>${r.packaging_size}</td><td class="${r.available_quantity <= 10 ? 'low' : ''}">${r.available_quantity}</td></tr>`))}</div>`;
+    $('#rv').onclick = async () => { try { const r = await api(`/reports/revenue?from=${$('#from').value}&to=${$('#to').value}`);
+      $('#rvOut').innerHTML = `<b style="font-size:20px;color:#1f4e8c">${M(r.data.total_revenue)}</b> from ${r.data.number_of_sales} sale(s)`; } catch (e) { toast(e.message, true); } };
+  },
+};
+
+const NAMES = { dashboard: 'Dashboard', stock: 'Stock', suppliers: 'Suppliers', fruits: 'Fruits', vendors: 'Vendors', purchases: 'Purchases', sales: 'Sales', reports: 'Reports' };
+let current = location.hash.slice(1) in views ? location.hash.slice(1) : 'dashboard';
+$('#nav').innerHTML = Object.entries(NAMES).map(([k, n]) => `<button data-v="${k}">${n}</button>`).join('');
+$('#nav').onclick = (e) => { if (e.target.dataset.v) { location.hash = e.target.dataset.v; show(e.target.dataset.v); } };
+async function show(v) {
+  current = v;
+  document.querySelectorAll('#nav button').forEach((b) => b.classList.toggle('on', b.dataset.v === v));
+  const el = $('#view');
+  try { await views[v](el); } catch (e) { el.innerHTML = `<div class="card low">Could not load data: ${esc(e.message)}<br><span class="muted">Is the API / database running?</span></div>`; }
+}
+show(current);
+</script>
+</body>
+</html>
