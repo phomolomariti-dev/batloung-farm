@@ -7,7 +7,7 @@ const { notFound, errorHandler } = require('./middleware/errorHandler');
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname, '..', 'public'))); // map dashboard
+app.use(express.static(path.join(__dirname, '..', '..', 'frontend', 'public'))); // serve frontend dashboard
 
 app.get('/api/health', async (req, res) => {
   try {

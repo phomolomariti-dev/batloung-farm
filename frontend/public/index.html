@@ -59,7 +59,10 @@
 const SIZES = ['small', 'medium', 'large'];
 const PROVINCES = ['Gauteng','Free State','KwaZulu-Natal','Western Cape','Eastern Cape','Limpopo','Mpumalanga','North West'];
 const $ = (s, r = document) => r.querySelector(s);
-const M = (n) => 'M' + Number(n || 0).toFixed(2);
+const M = (n) => {
+  const amount = Number(n);
+  return Number.isFinite(amount) ? `M${amount.toFixed(2)}` : 'Unavailable';
+};
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fmtTime = (m) => m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m} min`;
 const tripText = (t) => t ? `${t.distance_km} km, about ${fmtTime(t.one_way_minutes)} one way (${fmtTime(t.round_trip_minutes)} round trip)` : 'No coordinates yet';
@@ -255,8 +258,8 @@ const views = {
   async dashboard(el) {
     const [low, bal, top, tv, rev] = await Promise.all([api('/stock/low'), api('/vendors/balances'), api('/reports/top-fruits'),
       api('/reports/top-vendor').catch(() => ({ data: null })), api('/sales')]);
-    const owed = bal.data.reduce((s, v) => s + v.outstanding_balance, 0);
-    const revenue = rev.data.reduce((s, x) => s + x.total_amount, 0);
+    const owed = bal.data.reduce((sum, vendor) => sum + Number(vendor.outstanding_balance || 0), 0);
+    const revenue = rev.data.reduce((sum, sale) => sum + Number(sale.total_amount || 0), 0);
     el.innerHTML = `<h2>Dashboard</h2>
       <div class="grid">
         <div class="stat">Total sales<b>${M(revenue)}</b>${rev.count} sale(s)</div>
