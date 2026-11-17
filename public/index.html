@@ -34,6 +34,13 @@
   #toast{position:fixed;right:16px;bottom:16px;padding:12px 16px;border-radius:8px;color:#fff;display:none;max-width:380px;z-index:9999}
   #map{height:480px;border-radius:10px}
   .muted{color:#667}
+  .person-link{padding:0;border:0;background:none;color:var(--g);font:inherit;cursor:pointer}
+  .availability{font-weight:600}.unavailable{color:var(--red)}
+  dialog{width:min(560px,calc(100% - 32px));max-height:80vh;border:1px solid var(--bd);border-radius:10px;padding:18px}
+  dialog::backdrop{background:rgba(0,0,0,.4)}
+  .details{display:grid;grid-template-columns:minmax(120px,1fr) 2fr;gap:8px;margin:12px 0}
+  .details dt{font-weight:600}.details dd{margin:0;overflow-wrap:anywhere}
+  #profile-map{height:320px;border-radius:8px;margin:10px 0}
   .PENDING{background:#e3f2fd;color:#0d47a1}.DELIVERED{background:#d7f0d7;color:#1b5e20}
   .best{background:#fff8e1}
 </style>
@@ -45,6 +52,7 @@
 </header>
 <main id="view">Loading...</main>
 <div id="toast"></div>
+<dialog id="profile"><div class="row" style="justify-content:space-between"><h2 id="profile-title"></h2><button class="b sec" id="profile-close">Close</button></div><div id="profile-content"></div></dialog>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
@@ -68,6 +76,120 @@ function toast(msg, bad, ms = 4500) {
   const t = $('#toast'); t.textContent = msg; t.style.background = bad ? '#c62828' : '#1f4e8c'; t.style.display = 'block';
   clearTimeout(toast.t); toast.t = setTimeout(() => (t.style.display = 'none'), ms);
 }
+async function lookupPlaceName(lat, lng) {
+  const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&accept-language=en&lat=${lat}&lon=${lng}`);
+  if (!response.ok) throw new Error(`Place lookup failed (${response.status})`);
+  const result = await response.json();
+  const address = result.address || {};
+  const name = [
+    address.amenity || address.shop || address.road || address.pedestrian || address.path,
+    address.suburb || address.neighbourhood || address.village || address.town || address.city || address.county,
+    address.state,
+    address.country,
+  ].filter(Boolean).join(', ') || result.name || result.display_name;
+  if (!name) throw new Error('No place name was found for this map point.');
+  return name;
+}
+
+let profileMap;
+let profileSession = 0;
+function showProfile(title, data, type, id) {
+  const session = ++profileSession;
+  const entries = [];
+  const flatten = (value, prefix) => {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      Object.entries(value).forEach(([key, child]) => flatten(child, prefix ? `${prefix} - ${key}` : key));
+    } else {
+      entries.push(`<dt>${esc(prefix.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()))}</dt><dd>${value == null || value === '' ? 'Not provided' : esc(value)}</dd>`);
+    }
+  };
+  Object.entries(data).forEach(([key, value]) => flatten(value, key));
+  $('#profile-title').textContent = title;
+  const placeField = type === 'vendor' ? 'location' : 'address';
+  const place = data[placeField] || '';
+  const hasCoordinates = data.latitude != null && data.longitude != null;
+  const initialCenter = hasCoordinates ? [Number(data.latitude), Number(data.longitude)] : [-29.31, 27.48];
+  $('#profile-content').innerHTML = `<dl class="details">${entries.join('')}</dl>
+    <h3>Location</h3><label for="profile-place">${type === 'vendor' ? 'Vendor location' : 'Supplier address'}</label>
+    <div class="row"><input id="profile-place" value="${esc(place)}" style="flex:1" placeholder="Location or address">
+      <button class="b" id="save-profile-location">Save new location</button></div>
+    <p class="muted">Click the map to choose this ${type === 'vendor' ? "vendor's" : "supplier's"} location. Update the text above if needed. The ID stays unchanged, so linked records remain connected.</p>
+    <p id="profile-selection" class="muted">${hasCoordinates ? `Current saved pin: ${Number(data.latitude).toFixed(6)}, ${Number(data.longitude).toFixed(6)}. Click the map to choose a new location.` : 'No map pin saved. Click the map to choose a location before saving.'}</p>
+    <div id="profile-map"></div>`;
+  $('#profile').showModal();
+  if (profileMap) profileMap.remove();
+  profileMap = L.map('profile-map').setView(initialCenter, hasCoordinates ? 13 : 7);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors' }).addTo(profileMap);
+  let marker = hasCoordinates ? L.marker(initialCenter).addTo(profileMap) : null;
+  let selected = hasCoordinates ? { latitude: Number(data.latitude), longitude: Number(data.longitude) } : { latitude: null, longitude: null };
+  let lookupRequest = 0;
+  let placeEdited = false;
+  const placeInput = $('#profile-place');
+  const saveButton = $('#save-profile-location');
+  placeInput.addEventListener('input', () => {
+    placeEdited = true;
+    $('#profile-selection').textContent = 'Custom place name entered. Click Save new location to apply it.';
+  });
+  profileMap.on('click', (e) => {
+    selected = { latitude: Number(e.latlng.lat.toFixed(6)), longitude: Number(e.latlng.lng.toFixed(6)) };
+    const request = ++lookupRequest;
+    placeEdited = false;
+    placeInput.value = 'Looking up place name...';
+    saveButton.disabled = true;
+    $('#profile-selection').textContent = `Map point selected (${selected.latitude.toFixed(6)}, ${selected.longitude.toFixed(6)}). Looking up place name...`;
+    if (marker) marker.setLatLng(e.latlng); else marker = L.marker(e.latlng).addTo(profileMap);
+    lookupPlaceName(selected.latitude, selected.longitude).then((name) => {
+      if (session !== profileSession || request !== lookupRequest || placeEdited) return;
+      placeInput.value = name;
+      $('#profile-selection').textContent = `Place found: ${name}. Click Save new location to apply it.`;
+    }).catch((error) => {
+      if (session !== profileSession || request !== lookupRequest || placeEdited) return;
+      placeInput.value = `${selected.latitude.toFixed(6)}, ${selected.longitude.toFixed(6)}`;
+      $('#profile-selection').textContent = 'Could not find a place name. Enter one above, or save the coordinates.';
+      toast(error.message, true);
+    }).finally(() => {
+      if (session === profileSession && request === lookupRequest) saveButton.disabled = false;
+    });
+  });
+  saveButton.onclick = async () => {
+    const placeValue = placeInput.value.trim();
+    if (!placeValue) { toast('Enter a location or address before saving.', true); return; }
+    if (selected.latitude == null || selected.longitude == null) { toast('Click the map to select a location before saving.', true); return; }
+    const body = { [placeField]: placeValue, ...selected };
+    try {
+      await api(`/${type === 'vendor' ? 'vendors' : 'suppliers'}/${id}`, 'PUT', body);
+      toast('Location updated');
+      closeProfile();
+      await show(current);
+      await openProfile(type, id, title);
+    } catch (e) { toast(e.message, true); }
+  };
+  setTimeout(() => profileMap.invalidateSize(), 50);
+}
+function closeProfile() {
+  profileSession += 1;
+  $('#profile').close();
+  if (profileMap) { profileMap.remove(); profileMap = null; }
+}
+$('#profile-close').onclick = closeProfile;
+$('#profile').addEventListener('click', (e) => { if (e.target === $('#profile')) closeProfile(); });
+$('#profile').addEventListener('cancel', (e) => { e.preventDefault(); closeProfile(); });
+async function openProfile(type, id, name) {
+  const details = type === 'vendor'
+    ? await Promise.all([api(`/vendors/${id}`), api(`/vendors/${id}/balance`)])
+    : [await api(`/suppliers/${id}`)];
+  showProfile(name, type === 'vendor' ? { ...details[0].data, account: details[1].data } : details[0].data, type, id);
+}
+async function bindProfiles(root) {
+  root.querySelectorAll('[data-profile]').forEach((button) => {
+    button.onclick = async () => {
+      try {
+        const { type, id, name } = button.dataset;
+        await openProfile(type, id, name);
+      } catch (e) { toast(e.message, true); }
+    };
+  });
+}
 // run an action, show errors as toasts, then re-render
 async function act(fn, okMsg) {
   try { await fn(); if (okMsg) toast(okMsg); show(current); } catch (e) { toast(e.message, true); }
@@ -83,15 +205,14 @@ function attachPicker(form, center, zoom) {
   // also fill the Location / Address text box with the place name (free OpenStreetMap lookup, needs internet)
   const place = form.querySelector('[name=location]') || form.querySelector('[name=address]');
   let autoFilled = true;
+  let lookupRequest = 0;
   if (place) place.addEventListener('input', () => { autoFilled = false; });
   const fillPlace = (lat, lng) => {
     if (!place || !(autoFilled || !place.value)) return;
-    fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&accept-language=en&lat=${lat}&lon=${lng}`)
-      .then((r) => r.json()).then((j) => {
-        const a = j.address || {};
-        const name = [a.road, a.suburb || a.neighbourhood, a.village || a.town || a.city || a.county].filter(Boolean).join(', ') || j.display_name;
-        if (name) { place.value = name; autoFilled = true; }
-      }).catch(() => {});
+    const request = ++lookupRequest;
+    lookupPlaceName(lat, lng).then((name) => {
+      if (request === lookupRequest && (autoFilled || !place.value)) { place.value = name; autoFilled = true; }
+    }).catch((error) => { if (request === lookupRequest) toast(error.message, true); });
   };
   btn.onclick = () => {
     const open = box.style.display === 'none'; box.style.display = open ? 'block' : 'none'; if (!open) return;
@@ -152,11 +273,11 @@ const views = {
   async stock(el) {
     const s = await api('/stock');
     const by = {};
-    s.data.forEach((r) => { (by[r.fruit_name] ||= {})[r.packaging_size] = r.available_quantity; });
+    s.data.forEach((r) => { (by[r.fruit_name] ||= { status: r.status })[r.packaging_size] = r.available_quantity; });
     const cell = (q) => `<td class="${q <= 10 ? 'low' : ''}">${q ?? 0}</td>`;
-    el.innerHTML = `<h2>Stock by packaging size</h2><div class="card">${table(['Fruit', 'Small', 'Medium', 'Large'],
-      Object.entries(by).map(([n, v]) => `<tr><td>${esc(n)}</td>${cell(v.small)}${cell(v.medium)}${cell(v.large)}</tr>`))}
-      <p class="muted">Red = 10 boxes or fewer (low stock).</p></div>`;
+    el.innerHTML = `<h2>Stock by packaging size</h2><div class="card">${table(['Fruit', 'Availability', 'Small', 'Medium', 'Large'],
+      Object.entries(by).map(([n, v]) => `<tr><td>${esc(n)}</td><td class="availability ${v.status === 'ACTIVE' ? '' : 'unavailable'}">${v.status === 'ACTIVE' ? 'Available' : 'Unavailable'}</td>${cell(v.small)}${cell(v.medium)}${cell(v.large)}</tr>`))}
+      <p class="muted">Inactive fruit is unavailable for purchases and sales. Red = 10 boxes or fewer (active fruit only).</p></div>`;
   },
 
   async suppliers(el) {
@@ -167,10 +288,11 @@ const views = {
         <input name="phone" placeholder="Phone"><select name="province">${opts(PROVINCES, (x) => x, (x) => x)}</select>
         <input name="address" placeholder="Address" style="min-width:240px">
         <input name="latitude" type="number" step="any" placeholder="Latitude" style="width:110px"><input name="longitude" type="number" step="any" placeholder="Longitude" style="width:110px">
-        <button class="b" id="add">Add</button></div><span class="muted">Latitude/longitude are optional and power the travel-time estimate from Maseru.</span></div>
-      <div class="card">${table(['ID', 'Business', 'Contact', 'Phone', 'Province', 'Trip from Maseru', ''], s.data.map((x) => `<tr><td>${x.supplier_id}</td>
-        <td>${esc(x.business_name)}</td><td>${esc(x.contact_person)}</td><td>${esc(x.phone)}</td><td>${esc(x.province)}</td><td>${tripText(x.trip)}</td>
+        <button class="b" id="add">Add</button></div><span class="muted">Coordinates are optional. Enter them or pick the location on the map.</span></div>
+      <div class="card">${table(['ID', 'Business', 'Contact', 'Phone', 'Province', ''], s.data.map((x) => `<tr><td>${x.supplier_id}</td>
+        <td><button class="person-link" type="button" data-profile data-type="supplier" data-id="${x.supplier_id}" data-name="${esc(x.business_name)}">${esc(x.business_name)}</button></td><td>${esc(x.contact_person)}</td><td>${esc(x.phone)}</td><td>${esc(x.province)}</td>
         <td><button class="b sec" data-edit="${x.supplier_id}">Edit phone</button> <button class="b del" data-del="${x.supplier_id}">Delete</button></td></tr>`))}</div>`;
+    bindProfiles(el);
     attachPicker($('#f'), [-28.5, 27], 5);
     $('#add').onclick = () => act(() => { const d = formData($('#f')); ['latitude', 'longitude'].forEach((k) => { if (d[k] === '') delete d[k]; }); return api('/suppliers', 'POST', d); }, 'Supplier registered');
     el.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => confirm('Delete this supplier?') && act(() => api('/suppliers/' + b.dataset.del, 'DELETE'), 'Supplier deleted'));
@@ -185,10 +307,10 @@ const views = {
         <input name="p_small" type="number" step="0.01" placeholder="Small price" style="width:110px">
         <input name="p_medium" type="number" step="0.01" placeholder="Medium price" style="width:110px">
         <input name="p_large" type="number" step="0.01" placeholder="Large price" style="width:110px"><button class="b" id="add">Add</button></div></div>
-      <div class="card">${table(['ID', 'Fruit', 'Description', 'Small', 'Medium', 'Large', 'Status', ''], f.data.map((x) => `<tr><td>${x.fruit_id}</td>
+      <div class="card">${table(['ID', 'Fruit', 'Description', 'Small', 'Medium', 'Large', 'Availability', ''], f.data.map((x) => `<tr><td>${x.fruit_id}</td>
         <td>${esc(x.fruit_name)}</td><td>${esc(x.description)}</td><td>${x.price_small ? M(x.price_small) : '-'}</td><td>${x.price_medium ? M(x.price_medium) : '-'}</td>
-        <td>${x.price_large ? M(x.price_large) : '-'}</td><td>${x.status}</td>
-        <td><button class="b sec" data-t="${x.fruit_id}|${x.status}">${x.status === 'ACTIVE' ? 'Deactivate' : 'Activate'}</button></td></tr>`))}</div>`;
+        <td>${x.price_large ? M(x.price_large) : '-'}</td><td class="availability ${x.status === 'ACTIVE' ? '' : 'unavailable'}">${x.status === 'ACTIVE' ? 'Available' : 'Unavailable'}</td>
+        <td><button class="b sec" data-t="${x.fruit_id}|${x.status}">${x.status === 'ACTIVE' ? 'Mark unavailable' : 'Mark available'}</button></td></tr>`))}</div>`;
     $('#add').onclick = () => act(() => {
       const d = formData($('#f')); const prices = {};
       SIZES.forEach((s) => { if (d['p_' + s]) prices[s] = Number(d['p_' + s]); });
@@ -201,8 +323,8 @@ const views = {
   async vendors(el) {
     const v = await api('/vendors/balances');
     const draw = (list) => { $('#vt').innerHTML = table(['ID', 'Vendor', 'Phone', 'Location', 'Orders', 'Billed', 'Paid', 'Owes'], list.map((x) => `<tr><td>${x.vendor_id}</td>
-      <td>${esc(x.vendor_name)}</td><td>${esc(x.phone_number)}</td><td>${esc(x.location)}</td><td>${x.total_orders ?? '-'}</td><td>${M(x.total_billed)}</td>
-      <td>${M(x.total_paid)}</td><td class="${x.outstanding_balance > 0 ? 'low' : ''}">${M(x.outstanding_balance)}</td></tr>`)); };
+      <td><button class="person-link" type="button" data-profile data-type="vendor" data-id="${x.vendor_id}" data-name="${esc(x.vendor_name)}">${esc(x.vendor_name)}</button></td><td>${esc(x.phone_number)}</td><td>${esc(x.location)}</td><td>${x.total_orders ?? '-'}</td><td>${M(x.total_billed)}</td>
+      <td>${M(x.total_paid)}</td><td class="${x.outstanding_balance > 0 ? 'low' : ''}">${M(x.outstanding_balance)}</td></tr>`)); bindProfiles($('#vt')); };
     el.innerHTML = `<h2>Vendors</h2>
       <div class="card" id="f"><h3 style="margin-top:0">Register vendor</h3><div class="row">
         <input name="vendor_name" placeholder="Vendor name"><input name="phone_number" placeholder="Phone"><input name="location" placeholder="Location">
@@ -225,7 +347,7 @@ const views = {
           <input id="cq" type="number" min="1" value="20" style="width:90px"> boxes <button class="b sec" id="cmp">Compare suppliers</button></div>
         <div id="cmpOut" class="muted">Compares each supplier's last price plus the cost of the trip from Maseru.</div></div>
       <div class="card" id="f"><h3 style="margin-top:0">Record purchase</h3>
-        <div class="row"><select name="supplier_id">${opts(s.data, (x) => x.supplier_id, (x) => `${x.business_name} (${x.province})`)}</select></div>
+        <div class="row"><select name="supplier_id"><option value="">Select a supplier</option>${opts(s.data, (x) => x.supplier_id, (x) => `${x.business_name} (${x.province})`)}</select></div>
         <div id="trip" class="card" style="background:#fff8e1;border-color:#f0d98a"></div>
         <div id="items"></div><div class="row"><button class="b sec" id="more">+ Add fruit</button><button class="b" id="save">Save purchase</button></div>
         <div id="landed"></div>
@@ -233,17 +355,37 @@ const views = {
       <div class="card">${table(['ID', 'Date', 'Supplier', 'Total'], p.data.map((x) => `<tr><td>${x.purchase_id}</td><td>${new Date(x.purchase_date).toLocaleString()}</td>
         <td>${esc(x.business_name)}</td><td>${M(x.total_amount)}</td></tr>`))}</div>`;
     const sup = () => s.data.find((x) => x.supplier_id === Number($('[name=supplier_id]').value));
+    let selectedTrip = null;
+    let tripRequest = 0;
     const calcLanded = () => {
-      const t = sup() && sup().trip; const rows = readItems($('#items'), true);
+      const t = selectedTrip; const rows = readItems($('#items'), true);
       const boxes = rows.reduce((a, r) => a + (r.quantity || 0), 0); const goods = rows.reduce((a, r) => a + (r.quantity || 0) * (r.unit_cost || 0), 0);
       $('#landed').innerHTML = (t && boxes && goods) ? `<p>Goods ${M(goods)} + trip ${M(t.trip_cost)} = <b>${M(goods + t.trip_cost)}</b> for ${boxes} boxes
         &rarr; landed cost <b>${M((goods + t.trip_cost) / boxes)}</b> per box on average</p>` : '';
     };
     window.calcTotal = calcLanded;
-    const showTrip = () => { const x = sup(); const t = x && x.trip;
-      $('#trip').innerHTML = x ? `<b>Trip to ${esc(x.business_name)} (${esc(x.province)})</b><br>${tripText(t)}` +
-        (t ? `<br><span class="muted">Driving alone: ${fmtTime(t.drive_minutes)}, plus about ${fmtTime(t.border_minutes)} at the border each way.
-        Estimated trip cost (fuel, vehicle, permits): <b>${M(t.trip_cost)}</b></span>` : '') : ''; calcLanded(); };
+    const showTrip = async () => {
+      const x = sup(); const request = ++tripRequest;
+      selectedTrip = null;
+      calcLanded();
+      if (!x) { $('#trip').textContent = 'Select a supplier to calculate a trip estimate.'; return; }
+      $('#trip').textContent = `Calculating trip to ${x.business_name}...`;
+      try {
+        const result = await api(`/suppliers/${x.supplier_id}/trip`);
+        if (request !== tripRequest) return;
+        const t = result.data.trip;
+        selectedTrip = t;
+        $('#trip').innerHTML = t ? `<b>Trip to ${esc(x.business_name)} (${esc(x.province)})</b><br>${tripText(t)}
+          <br><span class="muted">Driving alone: ${fmtTime(t.drive_minutes)}, plus about ${fmtTime(t.border_minutes)} at the border each way.
+          Estimated trip cost (fuel, vehicle, permits): <b>${M(t.trip_cost)}</b></span>`
+          : `No coordinates saved for ${esc(x.business_name)}. Add the location on the Suppliers map to estimate the trip.`;
+        calcLanded();
+      } catch (e) {
+        if (request !== tripRequest) return;
+        $('#trip').textContent = `Could not calculate trip: ${e.message}`;
+        toast(e.message, true);
+      }
+    };
     $('[name=supplier_id]').onchange = showTrip; showTrip();
     addItemRow($('#items'), f.data, true);
     $('#items').addEventListener('input', calcLanded);
@@ -310,7 +452,7 @@ const views = {
       <div class="card"><h3 style="margin-top:0">2. Sales revenue for a date range</h3><div class="row"><input type="date" id="from" value="2026-10-01"><input type="date" id="to" value="2026-10-31">
         <button class="b" id="rv">Calculate</button></div><div id="rvOut" class="muted"></div></div>
       <div class="card"><h3 style="margin-top:0">3. Vendor with the most boxes</h3>${tv.data ? `<b>${esc(tv.data.vendor_name)}</b> - ${tv.data.total_boxes} boxes (${esc(tv.data.location)})` : 'No sales yet'}</div>
-      <div class="card"><h3 style="margin-top:0">4. Current stock per fruit and size</h3>${table(['Fruit', 'Size', 'Boxes'], sl.data.map((r) => `<tr><td>${esc(r.fruit_name)}</td><td>${r.packaging_size}</td><td class="${r.available_quantity <= 10 ? 'low' : ''}">${r.available_quantity}</td></tr>`))}</div>`;
+      <div class="card"><h3 style="margin-top:0">4. Current stock per fruit and size</h3>${table(['Fruit', 'Availability', 'Size', 'Boxes on hand'], sl.data.map((r) => `<tr><td>${esc(r.fruit_name)}</td><td class="availability ${r.status === 'ACTIVE' ? '' : 'unavailable'}">${r.status === 'ACTIVE' ? 'Available' : 'Unavailable'}</td><td>${r.packaging_size}</td><td class="${r.status === 'ACTIVE' && r.available_quantity <= 10 ? 'low' : ''}">${r.available_quantity}</td></tr>`))}</div>`;
     $('#rv').onclick = async () => { try { const r = await api(`/reports/revenue?from=${$('#from').value}&to=${$('#to').value}`);
       $('#rvOut').innerHTML = `<b style="font-size:20px;color:#1f4e8c">${M(r.data.total_revenue)}</b> from ${r.data.number_of_sales} sale(s)`; } catch (e) { toast(e.message, true); } };
   },

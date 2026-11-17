@@ -1,27 +1,31 @@
 const model = require('../models/supplierModel');
 const { HttpError, asyncHandler } = require('../middleware/errorHandler');
-const { estimateTrip, depot } = require('../utils/geo');
+const { estimateTrip } = require('../utils/geo');
 const purchaseModel = require('../models/purchaseModel');
 const { SIZES } = require('../middleware/validate');
-const withTrip = (s) => ({ ...s, trip: estimateTrip(s.latitude, s.longitude) });
 
 exports.create = asyncHandler(async (req, res) => {
   const id = await model.create(req.body);
-  res.status(201).json({ success: true, message: 'Supplier registered', data: withTrip(await model.findById(id)) });
+  res.status(201).json({ success: true, message: 'Supplier registered', data: await model.findById(id) });
 });
 exports.getAll = asyncHandler(async (req, res) => {
-  const data = (await model.findAll()).map(withTrip);
-  res.status(200).json({ success: true, depot: depot(), count: data.length, data });
+  const data = await model.findAll();
+  res.status(200).json({ success: true, count: data.length, data });
 });
 exports.getOne = asyncHandler(async (req, res) => {
   const s = await model.findById(req.params.id);
   if (!s) throw new HttpError(404, `Supplier ${req.params.id} not found`);
-  res.status(200).json({ success: true, data: withTrip(s) });
+  res.status(200).json({ success: true, data: s });
+});
+exports.trip = asyncHandler(async (req, res) => {
+  const s = await model.findById(req.params.id);
+  if (!s) throw new HttpError(404, `Supplier ${req.params.id} not found`);
+  res.status(200).json({ success: true, data: { supplier_id: s.supplier_id, trip: estimateTrip(s.latitude, s.longitude) } });
 });
 exports.update = asyncHandler(async (req, res) => {
   if (!(await model.findById(req.params.id))) throw new HttpError(404, `Supplier ${req.params.id} not found`);
   await model.update(req.params.id, req.body);
-  res.status(200).json({ success: true, message: 'Supplier updated', data: withTrip(await model.findById(req.params.id)) });
+  res.status(200).json({ success: true, message: 'Supplier updated', data: await model.findById(req.params.id) });
 });
 // Business constraint: a supplier with purchase history cannot be deleted (keeps records consistent)
 exports.remove = asyncHandler(async (req, res) => {

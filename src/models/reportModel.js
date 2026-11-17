@@ -20,6 +20,6 @@ exports.topVendor = async () => (await pool.query(
 
 // 4. Current stock per fruit and packaging size
 exports.stockLevels = async () => (await pool.query(
-  `SELECT f.fruit_name, st.packaging_size, st.available_quantity
+  `SELECT f.fruit_name, f.status, st.packaging_size, st.available_quantity
    FROM stock st JOIN fruits f ON f.fruit_id = st.fruit_id
    ORDER BY f.fruit_name, FIELD(st.packaging_size,'small','medium','large')`))[0];
