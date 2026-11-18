@@ -53,6 +53,24 @@
 <main id="view">Loading...</main>
 <div id="toast"></div>
 <dialog id="profile"><div class="row" style="justify-content:space-between"><h2 id="profile-title"></h2><button class="b sec" id="profile-close">Close</button></div><div id="profile-content"></div></dialog>
+<dialog id="payment-dialog">
+  <form id="payment-form">
+    <h2 style="margin-top:0">Record payment</h2>
+    <p class="muted" id="payment-outstanding"></p>
+    <input type="hidden" name="sale_id">
+    <div class="row">
+      <select name="method" aria-label="Payment method">
+        <option value="CASH">Cash</option>
+        <option value="MOBILE_MONEY">Mobile money</option>
+      </select>
+      <input name="amount" type="number" step="0.01" min="0.01" required placeholder="Amount received" aria-label="Amount received">
+    </div>
+    <div class="row" style="justify-content:flex-end">
+      <button type="button" class="b sec" id="payment-cancel">Cancel</button>
+      <button type="submit" class="b">Record payment</button>
+    </div>
+  </form>
+</dialog>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
@@ -234,6 +252,25 @@ function attachPicker(form, center, zoom) {
 }
 const clock = (iso) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
+$('#payment-cancel').onclick = () => $('#payment-dialog').close();
+$('#payment-form').onsubmit = (event) => {
+  event.preventDefault();
+  const d = formData($('#payment-form'));
+  const amount = Number(d.amount);
+  const outstanding = Number($('#payment-form [name=amount]').max);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    toast('Enter a payment amount greater than zero.', true);
+    return;
+  }
+  if (!Number.isFinite(outstanding) || amount > outstanding) {
+    toast(`Payment cannot exceed the outstanding balance of ${M(outstanding)}.`, true);
+    return;
+  }
+  const method = String(d.method).toUpperCase();
+  $('#payment-dialog').close();
+  act(() => api(`/sales/${d.sale_id}/payments`, 'POST', { method, amount }), 'Payment recorded');
+};
+
 // ---------- item rows (shared by purchases and sales) ----------
 function addItemRow(box, fruits, withCost) {
   const d = document.createElement('div'); d.className = 'row item';
@@ -298,7 +335,7 @@ const views = {
     bindProfiles(el);
     attachPicker($('#f'), [-28.5, 27], 5);
     $('#add').onclick = () => act(() => { const d = formData($('#f')); ['latitude', 'longitude'].forEach((k) => { if (d[k] === '') delete d[k]; }); return api('/suppliers', 'POST', d); }, 'Supplier registered');
-    el.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => confirm('Delete this supplier?') && act(() => api('/suppliers/' + b.dataset.del, 'DELETE'), 'Supplier deleted'));
+    el.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => confirm('Delete this supplier and all of its purchase history? Stock for those purchases will also be reversed.') && act(() => api('/suppliers/' + b.dataset.del, 'DELETE'), 'Supplier and purchase history deleted'));
     el.querySelectorAll('[data-edit]').forEach((b) => b.onclick = () => { const p = prompt('New phone number:'); if (p) act(() => api('/suppliers/' + b.dataset.edit, 'PUT', { phone: p }), 'Supplier updated'); });
   },
 
@@ -440,9 +477,14 @@ const views = {
       show('sales');
     } catch (e) { toast(e.message, true); } };
     el.querySelectorAll('[data-pay]').forEach((b) => b.onclick = () => {
-      const amount = prompt('Amount received:'); if (!amount) return;
-      const method = (prompt('Method: CASH or MOBILE_MONEY', 'CASH') || '').toUpperCase();
-      act(() => api(`/sales/${b.dataset.pay}/payments`, 'POST', { method, amount: Number(amount) }), 'Payment recorded');
+      const sale = s.data.find((x) => x.sale_id === Number(b.dataset.pay));
+      if (!sale) return;
+      $('#payment-form').reset();
+      $('#payment-form [name=sale_id]').value = sale.sale_id;
+      const outstanding = Number(sale.outstanding_balance);
+      $('#payment-outstanding').textContent = `Outstanding balance: ${M(outstanding)}`;
+      $('#payment-form [name=amount]').max = outstanding;
+      $('#payment-dialog').showModal();
     });
     el.querySelectorAll('[data-dv]').forEach((b) => b.onclick = () => { const [id, st] = b.dataset.dv.split('|');
       act(() => api(`/sales/${id}/delivery`, 'PATCH', { status: st === 'PENDING' ? 'DELIVERED' : 'PENDING' }), 'Delivery updated'); });

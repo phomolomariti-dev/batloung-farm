@@ -2,6 +2,8 @@ const model = require('../models/supplierModel');
 const { HttpError, asyncHandler } = require('../middleware/errorHandler');
 const { estimateTrip } = require('../utils/geo');
 const purchaseModel = require('../models/purchaseModel');
+const stockModel = require('../models/stockModel');
+const { withTransaction } = require('../config/db');
 const { SIZES } = require('../middleware/validate');
 
 exports.create = asyncHandler(async (req, res) => {
@@ -27,13 +29,48 @@ exports.update = asyncHandler(async (req, res) => {
   await model.update(req.params.id, req.body);
   res.status(200).json({ success: true, message: 'Supplier updated', data: await model.findById(req.params.id) });
 });
-// Business constraint: a supplier with purchase history cannot be deleted (keeps records consistent)
 exports.remove = asyncHandler(async (req, res) => {
-  if (!(await model.findById(req.params.id))) throw new HttpError(404, `Supplier ${req.params.id} not found`);
-  const n = await model.countPurchases(req.params.id);
-  if (n > 0) throw new HttpError(409, `Cannot delete supplier: it has ${n} recorded purchase(s)`);
-  await model.remove(req.params.id);
-  res.status(200).json({ success: true, message: 'Supplier deleted' });
+  const result = await withTransaction(async (conn) => {
+    if (!(await model.findById(req.params.id, conn))) {
+      throw new HttpError(404, `Supplier ${req.params.id} not found`);
+    }
+
+    const purchaseCount = await model.countPurchases(req.params.id, conn);
+    const stockLines = await model.getPurchaseStock(req.params.id, conn);
+
+    for (const line of stockLines) {
+      const available = await stockModel.lockRow(
+        conn,
+        line.fruit_id,
+        line.packaging_size,
+      );
+      if (available < Number(line.quantity)) {
+        throw new HttpError(409,
+          `Cannot delete supplier: ${line.quantity} ${line.packaging_size} box(es) of fruit ${line.fruit_id} are in stock or already consumed; available stock is ${available}`);
+      }
+    }
+
+    for (const line of stockLines) {
+      if (!(await stockModel.decrease(
+        conn,
+        line.fruit_id,
+        line.packaging_size,
+        Number(line.quantity),
+      ))) {
+        throw new HttpError(409, 'Stock changed while deleting the supplier. Please retry.');
+      }
+    }
+
+    await model.removePurchases(req.params.id, conn);
+    await model.remove(req.params.id, conn);
+    return { purchaseCount };
+  });
+
+  res.status(200).json({
+    success: true,
+    message: 'Supplier and its purchase history deleted',
+    deleted_purchases: result.purchaseCount,
+  });
 });
 
 // Which supplier is really cheapest once the trip from Maseru is included?

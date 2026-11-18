@@ -70,17 +70,19 @@ exports.create = asyncHandler(async (req, res) => {
 // Record an extra payment on an existing sale (cash or mobile money)
 exports.addPayment = asyncHandler(async (req, res) => {
   const method = String(req.body.method || '').toUpperCase();
-  const amount = round2(Number(req.body.amount));
+  const amountValue = Number(req.body.amount);
+  if (!Number.isFinite(amountValue)) throw new HttpError(400, 'Payment amount must be a valid number');
+  const amount = round2(amountValue);
   if (!['CASH', 'MOBILE_MONEY'].includes(method)) throw new HttpError(400, 'method must be CASH or MOBILE_MONEY');
   if (!(amount > 0)) throw new HttpError(400, 'amount must be greater than 0');
 
   const sale = await withTransaction(async (conn) => {
     const s = await saleModel.lockById(conn, req.params.id);
     if (!s) throw new HttpError(404, `Sale ${req.params.id} not found`);
-    const outstanding = round2(s.total_amount - s.amount_paid);
+    const outstanding = round2(Number(s.total_amount) - Number(s.amount_paid));
     if (outstanding <= 0) throw new HttpError(400, 'This sale is already fully paid');
     if (amount > outstanding) throw new HttpError(400, `Payment of ${amount} exceeds the outstanding balance of ${outstanding}`);
-    const newPaid = round2(s.amount_paid + amount);
+    const newPaid = round2(Number(s.amount_paid) + amount);
     await saleModel.insertPayment(conn, s.sale_id, method, amount);
     await saleModel.updatePayment(conn, s.sale_id, newPaid, paymentStatus(s.total_amount, newPaid));
     return saleModel.findById(s.sale_id, conn);

@@ -49,7 +49,7 @@ CREATE TABLE purchases (
   total_amount  DECIMAL(12,2) NOT NULL DEFAULT 0,
   CONSTRAINT chk_purchase_total CHECK (total_amount >= 0),
   CONSTRAINT fk_purchase_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(supplier_id)
-    ON DELETE RESTRICT ON UPDATE CASCADE
+    ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB;
 
 CREATE TABLE purchase_details (
