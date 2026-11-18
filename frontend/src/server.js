@@ -4,7 +4,7 @@ const path = require('path');
 
 const publicDirectory = path.resolve(__dirname, '..', 'public');
 const frontendPort = Number(process.env.FRONTEND_PORT || process.env.PORT) || 5173;
-const API_TARGET = process.env.API_URL || 'http://127.0.0.1:5000';
+const backend = new URL(process.env.BACKEND_URL || 'http://127.0.0.1:5000');
 const backend = new URL(API_TARGET);
 const contentTypes = {
   '.css': 'text/css; charset=utf-8',
