@@ -1,11 +1,12 @@
 const fs = require('fs');
 const http = require('http');
+const https = require('https');
 const path = require('path');
 
 const publicDirectory = path.resolve(__dirname, '..', 'public');
 const frontendPort = Number(process.env.FRONTEND_PORT || process.env.PORT) || 5173;
 const backend = new URL(process.env.BACKEND_URL || 'http://127.0.0.1:5000');
-const backend = new URL(API_TARGET);
+
 const contentTypes = {
   '.css': 'text/css; charset=utf-8',
   '.html': 'text/html; charset=utf-8',
@@ -17,9 +18,12 @@ const contentTypes = {
 };
 
 function proxyApi(request, response) {
-  const upstream = http.request({
+  const isHttps = backend.protocol === 'https:';
+  const client = isHttps ? https : http;
+
+  const upstream = client.request({
     hostname: backend.hostname,
-    port: backend.port || 80,
+    port: backend.port || (isHttps ? 443 : 80),
     method: request.method,
     path: request.url,
     headers: { ...request.headers, host: backend.host },
